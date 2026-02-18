@@ -43,8 +43,8 @@ class ModernMediaPipeEyeDetector:
 
         # ===== ПОРОГ ИЗ ВАШИХ ДАННЫХ =====
         # Используем ваши значения для точной настройки
-        self.ear_open = 0.283
-        self.ear_closed = 0.310
+        self.ear_open = 0.17
+        self.ear_closed = 0.13
 
         # Вычисляем порог (чуть выше среднего между открытыми и закрытыми)
         self.eye_threshold = (self.ear_open + self.ear_closed) / 2
