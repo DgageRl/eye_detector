@@ -5,6 +5,7 @@ from collections import deque
 from PIL import Image, ImageDraw, ImageFont
 import os
 import urllib.request
+import threading  # для запуска видео в отдельном потоке
 
 import mediapipe as mp
 from mediapipe.tasks import python
@@ -18,15 +19,13 @@ class ModernMediaPipeEyeDetector:
         self.LEFT_EYE_INDICES = [33, 133, 157, 158, 159, 160, 161, 173]
         self.RIGHT_EYE_INDICES = [362, 263, 387, 386, 385, 384, 398, 466]
 
-        # ИСПРАВЛЕНО: правильные индексы для вертикального измерения
-        # Для левого глаза: верхнее веко (159), нижнее веко (145)
-        # Для правого глаза: верхнее веко (386), нижнее веко (374)
-        self.LEFT_EYE_VERTICAL = [159, 145]  # верхняя и нижняя точки
-        self.RIGHT_EYE_VERTICAL = [386, 374]  # верхняя и нижняя точки
+        # Индексы для вертикального измерения
+        self.LEFT_EYE_VERTICAL = [159, 145]
+        self.RIGHT_EYE_VERTICAL = [386, 374]
 
-        # Индексы для горизонтального измерения (уголки глаз)
-        self.LEFT_EYE_HORIZONTAL = [33, 133]  # внешний и внутренний уголки
-        self.RIGHT_EYE_HORIZONTAL = [362, 263]  # внешний и внутренний уголки
+        # Индексы для горизонтального измерения
+        self.LEFT_EYE_HORIZONTAL = [33, 133]
+        self.RIGHT_EYE_HORIZONTAL = [362, 263]
 
         # ===== ПЕРЕМЕННЫЕ ДЛЯ СТАБИЛИЗАЦИИ =====
         self.ear_history = deque(maxlen=5)
@@ -35,18 +34,21 @@ class ModernMediaPipeEyeDetector:
 
         # ===== ПЕРЕМЕННЫЕ СОСТОЯНИЯ =====
         self.eyes_closed_start = None
-        self.alert_threshold = 2
+        self.alert_threshold = 2  # через сколько секунд включаем мем
         self.total_blinks = 0
         self.prev_eye_state = True
         self.last_state_change = 0
         self.state_change_delay = 0.2
 
+        # ===== НОВЫЕ ПРЕМЕННЫЕ ДЛЯ ВИДЕО =====
+        self.meme_thread = None  # поток с мемом
+        self.meme_playing = False  # играет ли мем сейчас
+        self.meme_window_name = "💩 МЕМНОЕ ВИДОСОВО 💩"  # название окна
+        self.meme_video_path = "meme.mp4"  # путь к мемному видео (можно поменять)
+
         # ===== ПОРОГ ИЗ ВАШИХ ДАННЫХ =====
-        # Используем ваши значения для точной настройки
         self.ear_open = 0.17
         self.ear_closed = 0.13
-
-        # Вычисляем порог (чуть выше среднего между открытыми и закрытыми)
         self.eye_threshold = (self.ear_open + self.ear_closed) / 2
         print(f"Порог установлен: {self.eye_threshold:.3f}")
 
@@ -63,7 +65,59 @@ class ModernMediaPipeEyeDetector:
         print(f"EAR открытых: {self.ear_open}")
         print(f"EAR закрытых: {self.ear_closed}")
         print(f"Порог: {self.eye_threshold}")
+        print(f"Мем включится через: {self.alert_threshold} сек")
         print("=" * 50)
+
+    def play_meme_video(self):
+        """
+        Проигрывает мемное видео в отдельном окне
+        Запускается в отдельном потоке
+        """
+        # Проверяем существует ли файл с видео
+        if not os.path.exists(self.meme_video_path):
+            print(f"❌ Видео не найдено: {self.meme_video_path}")
+            print("Положите файл meme.mp4 в папку с программой")
+            return
+
+        # Открываем видео
+        cap = cv2.VideoCapture(self.meme_video_path)
+        self.meme_playing = True
+
+        # Получаем FPS видео для правильного воспроизведения
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        delay = int(1000 / fps)  # задержка между кадрами в миллисекундах
+
+        print(f"🎬 МЕМ ЗАПУЩЕН! Видео: {self.meme_video_path}")
+
+        while self.meme_playing:
+            ret, frame = cap.read()
+            if not ret:
+                # Если видео закончилось, начинаем сначала
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                continue
+
+            # Показываем видео в отдельном окне
+            cv2.imshow(self.meme_window_name, frame)
+
+            # Проверяем нажатие клавиш в окне с мемом
+            key = cv2.waitKey(delay) & 0xFF
+            if key == 27:  # ESC - закрыть мем
+                break
+            elif key == ord(' '):  # пробел - пауза
+                cv2.waitKey(0)
+
+        # Освобождаем ресурсы
+        cap.release()
+        cv2.destroyWindow(self.meme_window_name)
+        self.meme_playing = False
+        print("🎬 Мем закончился")
+
+    def stop_meme(self):
+        """Останавливает проигрывание мема"""
+        if self.meme_playing:
+            self.meme_playing = False
+            if self.meme_thread and self.meme_thread.is_alive():
+                self.meme_thread.join(timeout=1.0)
 
     def download_model(self):
         """Скачивает модель FaceLandmarker если её нет"""
@@ -174,14 +228,10 @@ class ModernMediaPipeEyeDetector:
             return img
 
     def calculate_ear(self, landmarks, vertical_idx, horizontal_idx, frame_shape):
-        """
-        Вычисляет Eye Aspect Ratio (EAR)
-        Чем меньше значение - тем более закрыт глаз
-        """
+        """Вычисляет Eye Aspect Ratio (EAR)"""
         h, w = frame_shape[:2]
 
         try:
-            # Получаем координаты точек
             if hasattr(landmarks, 'landmark'):
                 v1 = landmarks.landmark[vertical_idx[0]]
                 v2 = landmarks.landmark[vertical_idx[1]]
@@ -193,21 +243,15 @@ class ModernMediaPipeEyeDetector:
                 h1 = landmarks[horizontal_idx[0]]
                 h2 = landmarks[horizontal_idx[1]]
 
-            # Конвертируем в пиксели
             v1_point = np.array([v1.x * w, v1.y * h])
             v2_point = np.array([v2.x * w, v2.y * h])
             h1_point = np.array([h1.x * w, h1.y * h])
             h2_point = np.array([h2.x * w, h2.y * h])
 
-            # Вычисляем расстояния
             vertical_dist = np.linalg.norm(v1_point - v2_point)
             horizontal_dist = np.linalg.norm(h1_point - h2_point)
 
-            # EAR = вертикальное расстояние / горизонтальное расстояние
             ear = vertical_dist / (horizontal_dist + 1e-6)
-
-            # ИНВЕРТИРУЕМ если нужно (если ваши данные показывают обратное)
-            # Но оставляем как есть, просто используем ваш порог
             return ear
 
         except Exception as e:
@@ -268,7 +312,6 @@ class ModernMediaPipeEyeDetector:
 
                 ear_value = (left_ear + right_ear) / 2.0
 
-                # Рисуем точки
                 self.draw_eye_points(frame, landmarks, self.LEFT_EYE_INDICES, (0, 255, 0))
                 self.draw_eye_points(frame, landmarks, self.RIGHT_EYE_INDICES, (0, 255, 0))
 
@@ -347,7 +390,6 @@ class ModernMediaPipeEyeDetector:
 
             # Логика определения состояния
             if stable_face:
-                # ИСПРАВЛЕНО: глаза закрыты, если EAR МЕНЬШЕ порога
                 eyes_closed = smoothed_ear < self.eye_threshold
 
                 if current_time - self.last_state_change > self.state_change_delay:
@@ -358,7 +400,6 @@ class ModernMediaPipeEyeDetector:
                             self.eyes_closed_start = current_time
                             self.last_state_change = current_time
 
-                            # Подсчет моргания (переход открыто -> закрыто)
                             if self.prev_eye_state:
                                 self.total_blinks += 1
                                 print(f"👁 Морг! Всего: {self.total_blinks}")
@@ -373,12 +414,20 @@ class ModernMediaPipeEyeDetector:
                             (50, 50), 36, (0, 0, 255)
                         )
 
+                        # ===== ВКЛЮЧАЕМ МЕМ =====
                         if closed_duration > self.alert_threshold:
+                            # Добавляем предупреждение на экран
                             frame = self.put_russian_text(
                                 frame,
-                                "⚠ ПРОСНИТЕСЬ! ⚠",
-                                (50, 100), 48, (0, 0, 255)
+                                "🎬 СЕЙЧАС БУДЕТ МЕМ! 🎬",
+                                (50, 100), 48, (0, 255, 255)
                             )
+
+                            # Если мем еще не играет - запускаем
+                            if not self.meme_playing:
+                                print("🎬 ВКЛЮЧАЕМ МЕМ!!!")
+                                self.meme_thread = threading.Thread(target=self.play_meme_video, daemon=True)
+                                self.meme_thread.start()
                     else:
                         # ГЛАЗА ОТКРЫТЫ
                         if self.eyes_closed_start is not None:
@@ -386,6 +435,11 @@ class ModernMediaPipeEyeDetector:
 
                         self.eyes_closed_start = None
                         self.prev_eye_state = True
+
+                        # Останавливаем мем если играет
+                        if self.meme_playing:
+                            print("👀 Глаза открыты, выключаем мем")
+                            self.stop_meme()
 
                         frame = self.put_russian_text(
                             frame,
@@ -398,13 +452,17 @@ class ModernMediaPipeEyeDetector:
                     "ЛИЦО НЕ ОБНАРУЖЕНО",
                     (50, 50), 32, (128, 128, 128)
                 )
+                # Если лицо пропало, выключаем мем
+                if self.meme_playing:
+                    self.stop_meme()
 
             # Отображение информации
             stats = [
                 f"Морганий: {self.total_blinks}",
                 f"EAR: {smoothed_ear:.3f}",
                 f"Порог: {self.eye_threshold:.3f}",
-                f"Состояние: {'ЗАКРЫТЫ' if smoothed_ear < self.eye_threshold else 'ОТКРЫТЫ'}"
+                f"Состояние: {'ЗАКРЫТЫ' if smoothed_ear < self.eye_threshold else 'ОТКРЫТЫ'}",
+                f"Мем: {'ИГРАЕТ' if self.meme_playing else 'ВЫКЛ'}"
             ]
 
             for i, stat in enumerate(stats):
@@ -429,6 +487,8 @@ class ModernMediaPipeEyeDetector:
                 self.total_blinks = 0
                 print("Счетчик сброшен")
 
+        # Очистка при выходе
+        self.stop_meme()
         cap.release()
         cv2.destroyAllWindows()
 
@@ -441,7 +501,6 @@ class ModernMediaPipeEyeDetector:
         graph_w = 400
         graph_h = 30
 
-        # Фон
         cv2.rectangle(frame, (graph_x, graph_y),
                       (graph_x + graph_w, graph_y + graph_h),
                       (50, 50, 50), -1)
@@ -449,23 +508,19 @@ class ModernMediaPipeEyeDetector:
                       (graph_x + graph_w, graph_y + graph_h),
                       (200, 200, 200), 1)
 
-        # Текущее значение (EAR обычно от 0 до 0.5)
         bar_width = int((current_ear / 0.5) * graph_w)
         bar_width = min(bar_width, graph_w)
 
-        # Цвет: зеленый если открыты (EAR > порог), красный если закрыты
         color = (0, 255, 0) if current_ear > threshold else (0, 0, 255)
         cv2.rectangle(frame, (graph_x, graph_y),
                       (graph_x + bar_width, graph_y + graph_h),
                       color, -1)
 
-        # Отметка порога
         threshold_x = graph_x + int((threshold / 0.5) * graph_w)
         cv2.line(frame, (threshold_x, graph_y - 5),
                  (threshold_x, graph_y + graph_h + 5),
                  (255, 255, 0), 2)
 
-        # Подписи
         cv2.putText(frame, f"EAR: {current_ear:.3f}", (graph_x, graph_y - 10),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
